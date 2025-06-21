@@ -29,6 +29,15 @@ public interface DailyCalendarRepository extends MongoRepository<DailyCalendar, 
     // Delete calendar by year and month
     void deleteByYearAndMonth(String year, String month);
 
+    // Find by region
+    List<DailyCalendar> findByRegion(String region);
+
+    // Find by organization
+    List<DailyCalendar> findByOrganizationId(String organizationId);
+
+    // Find by template ID
+    List<DailyCalendar> findByTemplateId(String templateId);
+
     // ===== DAY TYPE QUERIES =====
 
     // Find calendars with holidays
@@ -125,11 +134,16 @@ public interface DailyCalendarRepository extends MongoRepository<DailyCalendar, 
     // Find calendars with attendance percentage greater than threshold
     @Aggregation(pipeline = {
             "{ '$addFields': { " +
+                    "   'workingDaysCount': { '$size': { '$filter': { 'input': '$days', 'cond': { '$eq': ['$$this.type', 'working'] } } } }, " +
+                    "   'attendanceDaysCount': { '$size': { '$filter': { 'input': '$days', 'cond': { '$and': [ { '$eq': ['$$this.type', 'working'] }, { '$ne': ['$$this.attendance', null] } ] } } } } " +
+                    " } }",
+            "{ '$addFields': { " +
                     "   'attendanceRate': { " +
-                    "     '$divide': [ " +
-                    "       { '$size': { '$filter': { 'input': '$days', 'cond': { '$and': [ { '$eq': ['$$this.type', 'working'] }, { '$ne': ['$$this.attendance', null] } ] } } } }, " +
-                    "       { '$size': { '$filter': { 'input': '$days', 'cond': { '$eq': ['$$this.type', 'working'] } } } } " +
-                    "     ] " +
+                    "     '$cond': { " +
+                    "       'if': { '$eq': ['$workingDaysCount', 0] }, " +
+                    "       'then': 0, " +
+                    "       'else': { '$divide': ['$attendanceDaysCount', '$workingDaysCount'] } " +
+                    "     } " +
                     "   } " +
                     " } }",
             "{ '$match': { 'attendanceRate': { '$gte': ?0 } } }"
@@ -157,10 +171,48 @@ public interface DailyCalendarRepository extends MongoRepository<DailyCalendar, 
     @Query("{'days': {'$not': {'$elemMatch': {'type': 'working', '$or': [{'attendance': null}, {'attendance': {'$exists': false}}]}}}}")
     List<DailyCalendar> findCalendarsWithFullAttendance();
 
+    // Find calendars where all working days have attendance
+    @Query("{'$and': [" +
+            "{'days.type': 'working'}, " +
+            "{'days': {'$not': {'$elemMatch': {'type': 'working', '$or': [{'attendance': null}, {'attendance': {'$exists': false}}]}}}}" +
+            "]}")
+    List<DailyCalendar> findCalendarsWithCompleteAttendance();
+
     // Count calendars by year
     long countByYear(String year);
+
+    // Count calendars by region
+    long countByRegion(String region);
+
+    // Count calendars by organization
+    long countByOrganizationId(String organizationId);
 
     // Find distinct years in the database
     @Query(value = "{}", fields = "{'year': 1}")
     List<String> findDistinctYears();
+
+    // Find distinct regions
+    @Query(value = "{}", fields = "{'region': 1}")
+    List<String> findDistinctRegions();
+
+    // Find distinct organizations
+    @Query(value = "{}", fields = "{'organizationId': 1}")
+    List<String> findDistinctOrganizations();
+
+    // ===== TEMPLATE RELATED QUERIES =====
+
+    // Find calendars derived from a specific template
+    List<DailyCalendar> findByTemplateIdAndTemplateVersion(String templateId, String templateVersion);
+
+    // Find calendars that have been updated from their original template
+    @Query("{'days.isUpdated': true}")
+    List<DailyCalendar> findCalendarsWithUpdatedDays();
+
+    // Find calendars created in a specific time period
+    @Query("{'createdAt': {'$gte': ?0, '$lte': ?1}}")
+    List<DailyCalendar> findByCreatedAtBetween(java.time.LocalDateTime start, java.time.LocalDateTime end);
+
+    // Find recently modified calendars
+    @Query("{'updatedAt': {'$gte': ?0}}")
+    List<DailyCalendar> findByUpdatedAtAfter(java.time.LocalDateTime since);
 }

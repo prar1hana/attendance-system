@@ -11,8 +11,8 @@ public class MongoConnectionCheck {
     @Bean
     public CommandLineRunner init(MongoTemplate mongoTemplate) {
         return args -> {
-            boolean exists = mongoTemplate.collectionExists("DailyCalendar");
-            System.out.println("✅ MongoDB connection test: Collection 'DailyCalendar' exists? " + exists);
+            boolean exists = mongoTemplate.collectionExists("calendar_data");
+            System.out.println("✅ MongoDB connection test: Collection 'calendar_data' exists? " + exists);
         };
     }
 }

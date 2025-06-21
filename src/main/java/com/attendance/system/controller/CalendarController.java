@@ -29,20 +29,35 @@ public class CalendarController {
     private final CalendarService calendarService;
 
     // ===== BASIC CRUD ENDPOINTS =====
+
     @GetMapping("/{year}/{month}/day/{day}/status")
     public ResponseEntity<Map<String, String>> getDayStatus(
-            @PathVariable @Pattern(regexp = "\\d{4}") String year,
-            @PathVariable @Pattern(regexp = "^(0[1-9]|1[0-2])$") String month,
+            @PathVariable @Pattern(regexp = "\\d{4}", message = "Year must be 4 digits") String year,
+            @PathVariable @Pattern(regexp = "^(0[1-9]|1[0-2])$", message = "Month must be 01-12") String month,
             @PathVariable @Min(1) @Max(31) int day) {
 
-        Map<String, String> status = calendarService.getDayStatus(year, month, day);
-        return ResponseEntity.ok(status);
+        try {
+            Map<String, String> status = calendarService.getDayStatus(year, month, day);
+            return ResponseEntity.ok(status);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid request for day status: {}", e.getMessage());
+            return ResponseEntity.badRequest().build();
+        } catch (Exception e) {
+            log.error("Error getting day status: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/all")
     public ResponseEntity<List<DailyCalendar>> getAllCalendars() {
         log.info("REST request to get all calendars");
-        return ResponseEntity.ok(calendarService.getAllCalendars());
+        try {
+            List<DailyCalendar> calendars = calendarService.getAllCalendars();
+            return ResponseEntity.ok(calendars);
+        } catch (Exception e) {
+            log.error("Error getting all calendars: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/{year}/{month}")
@@ -50,9 +65,42 @@ public class CalendarController {
             @PathVariable @Pattern(regexp = "\\d{4}", message = "Year must be 4 digits") String year,
             @PathVariable @Pattern(regexp = "^(0[1-9]|1[0-2])$", message = "Month must be 01-12") String month) {
         log.info("REST request to get calendar for {}-{}", year, month);
-        Optional<DailyCalendar> calendar = calendarService.getCalendar(year, month);
-        return calendar.map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
+
+        try {
+            Optional<DailyCalendar> calendar = calendarService.getCalendar(year, month);
+            return calendar.map(ResponseEntity::ok)
+                    .orElse(ResponseEntity.notFound().build());
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid request parameters: {}", e.getMessage());
+            return ResponseEntity.badRequest().build();
+        } catch (Exception e) {
+            log.error("Error getting calendar: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    @GetMapping("/{year}/{month}/or-create")
+    public ResponseEntity<DailyCalendar> getOrCreateCalendar(
+            @PathVariable @Pattern(regexp = "\\d{4}", message = "Year must be 4 digits") String year,
+            @PathVariable @Pattern(regexp = "^(0[1-9]|1[0-2])$", message = "Month must be 01-12") String month,
+            @RequestParam(required = false) String regionCode) {
+        log.info("REST request to get or create calendar for {}-{} with region {}", year, month, regionCode);
+
+        try {
+            DailyCalendar calendar;
+            if (regionCode != null && !regionCode.trim().isEmpty()) {
+                calendar = calendarService.getOrCreateCalendar(year, month, regionCode);
+            } else {
+                calendar = calendarService.getOrCreateCalendar(year, month);
+            }
+            return ResponseEntity.ok(calendar);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid request parameters: {}", e.getMessage());
+            return ResponseEntity.badRequest().build();
+        } catch (Exception e) {
+            log.error("Error getting or creating calendar: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @PostMapping
@@ -60,7 +108,6 @@ public class CalendarController {
         log.info("REST request to create calendar for {}-{}", calendar.getYear(), calendar.getMonth());
 
         try {
-            calendarService.validateCalendarData(calendar);
             DailyCalendar result = calendarService.createCalendar(calendar);
             return ResponseEntity.status(HttpStatus.CREATED).body(result);
         } catch (IllegalArgumentException e) {
@@ -69,6 +116,9 @@ public class CalendarController {
         } catch (RuntimeException e) {
             log.error("Error creating calendar: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.CONFLICT).build();
+        } catch (Exception e) {
+            log.error("Unexpected error creating calendar: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
@@ -80,12 +130,14 @@ public class CalendarController {
         log.info("REST request to update calendar for {}-{}", year, month);
 
         try {
-            calendarService.validateCalendarData(calendar);
             DailyCalendar result = calendarService.updateCalendar(year, month, calendar);
             return ResponseEntity.ok(result);
         } catch (IllegalArgumentException e) {
             log.error("Invalid calendar data: {}", e.getMessage());
             return ResponseEntity.badRequest().build();
+        } catch (Exception e) {
+            log.error("Error updating calendar: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
@@ -98,6 +150,9 @@ public class CalendarController {
         try {
             calendarService.deleteCalendar(year, month);
             return ResponseEntity.noContent().build();
+        } catch (IllegalArgumentException e) {
+            log.error("Calendar not found: {}", e.getMessage());
+            return ResponseEntity.notFound().build();
         } catch (Exception e) {
             log.error("Error deleting calendar: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
@@ -116,6 +171,9 @@ public class CalendarController {
         try {
             DailyCalendar result = calendarService.generateCalendar(year, month, holidays);
             return ResponseEntity.status(HttpStatus.CREATED).body(result);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid parameters for calendar generation: {}", e.getMessage());
+            return ResponseEntity.badRequest().build();
         } catch (Exception e) {
             log.error("Error generating calendar: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
@@ -129,15 +187,22 @@ public class CalendarController {
             @PathVariable @Pattern(regexp = "\\d{4}", message = "Year must be 4 digits") String year,
             @PathVariable @Pattern(regexp = "^(0[1-9]|1[0-2])$", message = "Month must be 01-12") String month,
             @PathVariable @Min(1) @Max(31) int day,
-            @RequestParam @Pattern(regexp = "^(working|holiday|weekend)$", message = "Type must be working, holiday, or weekend") String type) {
+            @RequestParam @Pattern(regexp = "^(working|holiday|weekend|leave)$",
+                    message = "Type must be working, holiday, weekend, or leave") String type) {
         log.info("REST request to update day type for {}-{}-{} to {}", year, month, day, type);
 
         try {
             DailyCalendar result = calendarService.updateDayType(year, month, day, type);
             return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid request to update day type: {}", e.getMessage());
+            return ResponseEntity.badRequest().build();
         } catch (RuntimeException e) {
             log.error("Error updating day type: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+        } catch (Exception e) {
+            log.error("Unexpected error updating day type: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
@@ -151,9 +216,37 @@ public class CalendarController {
         try {
             DailyCalendar result = calendarService.addDayEntry(year, month, dayEntry);
             return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid day entry: {}", e.getMessage());
+            return ResponseEntity.badRequest().build();
         } catch (RuntimeException e) {
             log.error("Error adding day entry: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+        } catch (Exception e) {
+            log.error("Unexpected error adding day entry: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+
+    @PutMapping("/{year}/{month}/day/{day}/status")
+    public ResponseEntity<DailyCalendar> updateDayStatus(
+            @PathVariable @Pattern(regexp = "\\d{4}", message = "Year must be 4 digits") String year,
+            @PathVariable @Pattern(regexp = "^(0[1-9]|1[0-2])$", message = "Month must be 01-12") String month,
+            @PathVariable @Min(1) @Max(31) int day,
+            @RequestParam(required = false) String type,
+            @RequestParam(required = false) String attendance,
+            @RequestParam(required = false) String description) {
+        log.info("REST request to update day status for {}-{}-{}", year, month, day);
+
+        try {
+            DailyCalendar result = calendarService.updateDayStatus(year, month, day, type, attendance, description);
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid request to update day status: {}", e.getMessage());
+            return ResponseEntity.badRequest().build();
+        } catch (Exception e) {
+            log.error("Error updating day status: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
@@ -176,6 +269,9 @@ public class CalendarController {
         } catch (RuntimeException e) {
             log.error("Error updating attendance: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+        } catch (Exception e) {
+            log.error("Unexpected error updating attendance: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
@@ -193,6 +289,9 @@ public class CalendarController {
         } catch (RuntimeException e) {
             log.error("Error clearing attendance: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+        } catch (Exception e) {
+            log.error("Unexpected error clearing attendance: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
@@ -206,9 +305,15 @@ public class CalendarController {
         try {
             List<DailyCalendar> result = calendarService.bulkUpdateAttendance(year, month, attendanceMap);
             return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid bulk attendance data: {}", e.getMessage());
+            return ResponseEntity.badRequest().build();
         } catch (RuntimeException e) {
             log.error("Error updating attendance in bulk: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+        } catch (Exception e) {
+            log.error("Unexpected error in bulk attendance update: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
@@ -222,9 +327,15 @@ public class CalendarController {
         try {
             List<DailyCalendar> result = calendarService.bulkUpdateDayTypes(year, month, dayTypeMap);
             return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            log.error("Invalid bulk day type data: {}", e.getMessage());
+            return ResponseEntity.badRequest().build();
         } catch (RuntimeException e) {
             log.error("Error updating day types in bulk: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+        } catch (Exception e) {
+            log.error("Unexpected error in bulk day type update: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
@@ -242,22 +353,37 @@ public class CalendarController {
         } catch (RuntimeException e) {
             log.error("Error getting statistics: {}", e.getMessage());
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+        } catch (Exception e) {
+            log.error("Unexpected error getting statistics: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
         }
     }
 
     @GetMapping("/stats/overall")
     public ResponseEntity<Map<String, Object>> getOverallStatistics() {
         log.info("REST request to get overall statistics");
-        Map<String, Object> stats = calendarService.getOverallStatistics();
-        return ResponseEntity.ok(stats);
+
+        try {
+            Map<String, Object> stats = calendarService.getOverallStatistics();
+            return ResponseEntity.ok(stats);
+        } catch (Exception e) {
+            log.error("Error getting overall statistics: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/stats/year/{year}")
     public ResponseEntity<Map<String, Object>> getYearlyStatistics(
             @PathVariable @Pattern(regexp = "\\d{4}", message = "Year must be 4 digits") String year) {
         log.info("REST request to get yearly statistics for {}", year);
-        Map<String, Object> stats = calendarService.getYearlyStatistics(year);
-        return ResponseEntity.ok(stats);
+
+        try {
+            Map<String, Object> stats = calendarService.getYearlyStatistics(year);
+            return ResponseEntity.ok(stats);
+        } catch (Exception e) {
+            log.error("Error getting yearly statistics: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     // ===== QUERY ENDPOINTS =====
@@ -266,49 +392,105 @@ public class CalendarController {
     public ResponseEntity<List<DailyCalendar>> getCalendarsByYear(
             @PathVariable @Pattern(regexp = "\\d{4}", message = "Year must be 4 digits") String year) {
         log.info("REST request to get calendars for year {}", year);
-        return ResponseEntity.ok(calendarService.getCalendarsByYear(year));
+
+        try {
+            List<DailyCalendar> calendars = calendarService.getCalendarsByYear(year);
+            return ResponseEntity.ok(calendars);
+        } catch (Exception e) {
+            log.error("Error getting calendars by year: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/holidays")
     public ResponseEntity<List<DailyCalendar>> getCalendarsWithHolidays() {
         log.info("REST request to get calendars with holidays");
-        return ResponseEntity.ok(calendarService.getCalendarsWithHolidays());
+
+        try {
+            List<DailyCalendar> calendars = calendarService.getCalendarsWithHolidays();
+            return ResponseEntity.ok(calendars);
+        } catch (Exception e) {
+            log.error("Error getting calendars with holidays: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/attendance")
     public ResponseEntity<List<DailyCalendar>> getCalendarsWithAttendance() {
         log.info("REST request to get calendars with attendance");
-        return ResponseEntity.ok(calendarService.getCalendarsWithAttendance());
+
+        try {
+            List<DailyCalendar> calendars = calendarService.getCalendarsWithAttendance();
+            return ResponseEntity.ok(calendars);
+        } catch (Exception e) {
+            log.error("Error getting calendars with attendance: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/attendance/office")
     public ResponseEntity<List<DailyCalendar>> getCalendarsWithOfficeAttendance() {
         log.info("REST request to get calendars with office attendance");
-        return ResponseEntity.ok(calendarService.getCalendarsWithOfficeAttendance());
+
+        try {
+            List<DailyCalendar> calendars = calendarService.getCalendarsWithOfficeAttendance();
+            return ResponseEntity.ok(calendars);
+        } catch (Exception e) {
+            log.error("Error getting calendars with office attendance: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/attendance/wfh")
     public ResponseEntity<List<DailyCalendar>> getCalendarsWithWfhAttendance() {
         log.info("REST request to get calendars with WFH attendance");
-        return ResponseEntity.ok(calendarService.getCalendarsWithWfhAttendance());
+
+        try {
+            List<DailyCalendar> calendars = calendarService.getCalendarsWithWfhAttendance();
+            return ResponseEntity.ok(calendars);
+        } catch (Exception e) {
+            log.error("Error getting calendars with WFH attendance: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/attendance/mixed")
     public ResponseEntity<List<DailyCalendar>> getCalendarsWithMixedAttendance() {
         log.info("REST request to get calendars with mixed attendance");
-        return ResponseEntity.ok(calendarService.getCalendarsWithMixedAttendance());
+
+        try {
+            List<DailyCalendar> calendars = calendarService.getCalendarsWithMixedAttendance();
+            return ResponseEntity.ok(calendars);
+        } catch (Exception e) {
+            log.error("Error getting calendars with mixed attendance: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/attendance/incomplete")
     public ResponseEntity<List<DailyCalendar>> getCalendarsWithIncompleteAttendance() {
         log.info("REST request to get calendars with incomplete attendance");
-        return ResponseEntity.ok(calendarService.getCalendarsWithIncompleteAttendance());
+
+        try {
+            List<DailyCalendar> calendars = calendarService.getCalendarsWithIncompleteAttendance();
+            return ResponseEntity.ok(calendars);
+        } catch (Exception e) {
+            log.error("Error getting calendars with incomplete attendance: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/attendance/full")
     public ResponseEntity<List<DailyCalendar>> getCalendarsWithFullAttendance() {
         log.info("REST request to get calendars with full attendance");
-        return ResponseEntity.ok(calendarService.getCalendarsWithFullAttendance());
+
+        try {
+            List<DailyCalendar> calendars = calendarService.getCalendarsWithFullAttendance();
+            return ResponseEntity.ok(calendars);
+        } catch (Exception e) {
+            log.error("Error getting calendars with full attendance: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/range")
@@ -318,7 +500,14 @@ public class CalendarController {
             @RequestParam @Pattern(regexp = "\\d{4}", message = "End year must be 4 digits") String endYear,
             @RequestParam @Pattern(regexp = "^(0[1-9]|1[0-2])$", message = "End month must be 01-12") String endMonth) {
         log.info("REST request to get calendars from {}-{} to {}-{}", startYear, startMonth, endYear, endMonth);
-        return ResponseEntity.ok(calendarService.getCalendarsByDateRange(startYear, startMonth, endYear, endMonth));
+
+        try {
+            List<DailyCalendar> calendars = calendarService.getCalendarsByDateRange(startYear, startMonth, endYear, endMonth);
+            return ResponseEntity.ok(calendars);
+        } catch (Exception e) {
+            log.error("Error getting calendars by date range: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     // ===== UTILITY ENDPOINTS =====
@@ -328,26 +517,53 @@ public class CalendarController {
             @PathVariable @Pattern(regexp = "\\d{4}", message = "Year must be 4 digits") String year,
             @PathVariable @Pattern(regexp = "^(0[1-9]|1[0-2])$", message = "Month must be 01-12") String month) {
         log.info("REST request to check if calendar exists for {}-{}", year, month);
-        boolean exists = calendarService.calendarExists(year, month);
-        return ResponseEntity.ok(exists);
+
+        try {
+            boolean exists = calendarService.calendarExists(year, month);
+            return ResponseEntity.ok(exists);
+        } catch (Exception e) {
+            log.error("Error checking calendar existence: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/count")
     public ResponseEntity<Long> getTotalCalendarsCount() {
         log.info("REST request to get total calendars count");
-        return ResponseEntity.ok(calendarService.getTotalCalendarsCount());
+
+        try {
+            Long count = calendarService.getTotalCalendarsCount();
+            return ResponseEntity.ok(count);
+        } catch (Exception e) {
+            log.error("Error getting total calendars count: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/years")
     public ResponseEntity<List<String>> getDistinctYears() {
         log.info("REST request to get distinct years");
-        return ResponseEntity.ok(calendarService.getDistinctYears());
+
+        try {
+            List<String> years = calendarService.getDistinctYears();
+            return ResponseEntity.ok(years);
+        } catch (Exception e) {
+            log.error("Error getting distinct years: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 
     @GetMapping("/year/{year}/count")
     public ResponseEntity<Long> getCalendarCountByYear(
             @PathVariable @Pattern(regexp = "\\d{4}", message = "Year must be 4 digits") String year) {
         log.info("REST request to get calendar count for year {}", year);
-        return ResponseEntity.ok(calendarService.getCalendarCountByYear(year));
+
+        try {
+            Long count = calendarService.getCalendarCountByYear(year);
+            return ResponseEntity.ok(count);
+        } catch (Exception e) {
+            log.error("Error getting calendar count by year: {}", e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
     }
 }

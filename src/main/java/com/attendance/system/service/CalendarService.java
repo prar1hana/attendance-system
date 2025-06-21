@@ -1,5 +1,4 @@
 package com.attendance.system.service;
-import jakarta.persistence.EntityNotFoundException;
 
 import com.attendance.system.model.DailyCalendar;
 import com.attendance.system.repository.DailyCalendarRepository;
@@ -8,7 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.YearMonth;
+import jakarta.validation.Valid;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -19,95 +18,140 @@ import java.util.stream.Collectors;
 public class CalendarService {
 
     private final DailyCalendarRepository calendarRepository;
+    private final CalendarTemplateService templateService;
 
-    // ===== BASIC CRUD OPERATIONS =====
-    public Map<String, String> getDayStatus(String year, String month, int day) {
-        DailyCalendar calendar = calendarRepository.findByYearAndMonth(year, month)
-                .orElseThrow(() -> new EntityNotFoundException(
-                        "Calendar not found for " + year + "-" + month
-                ));
+    // ===== CALENDAR ACCESS WITH AUTO-GENERATION =====
 
-        DailyCalendar.DayEntry dayEntry = calendar.getDays().stream()
-                .filter(d -> d.getDay() == day)
-                .findFirst()
-                .orElseThrow(() -> new EntityNotFoundException(
-                        "Day " + day + " not found in " + year + "-" + month
-                ));
+    /**
+     * Get or create calendar - automatically generates base template if not exists
+     */
+    public DailyCalendar getOrCreateCalendar(String year, String month) {
+        log.debug("Getting or creating calendar for {}-{}", year, month);
 
-        Map<String, String> status = new HashMap<>();
-        status.put("day", String.valueOf(day));
-        status.put("type", dayEntry.getType());
+        validateYearMonth(year, month);
 
-        if ("working".equals(dayEntry.getType())) {
-            status.put("attendance",
-                    dayEntry.getAttendance() != null ? dayEntry.getAttendance() : "absent"
-            );
-        } else {
-            status.put("attendance", "non-working");
+        Optional<DailyCalendar> existing = calendarRepository.findByYearAndMonth(year, month);
+        if (existing.isPresent()) {
+            log.debug("Found existing calendar for {}-{}", year, month);
+            return existing.get();
         }
 
-        return status;
+        // Generate base calendar using template service
+        DailyCalendar baseCalendar = templateService.generateBaseCalendar(year, month);
+        DailyCalendar savedCalendar = calendarRepository.save(baseCalendar);
+        log.info("Created new calendar for {}-{}", year, month);
+        return savedCalendar;
     }
 
-    public List<DailyCalendar> getAllCalendars() {
-        log.debug("Fetching all calendars");
-        return calendarRepository.findAll();
+    /**
+     * Get or create calendar with specific region
+     */
+    public DailyCalendar getOrCreateCalendar(String year, String month, String regionCode) {
+        log.debug("Getting or creating calendar for {}-{} in region {}", year, month, regionCode);
+
+        validateYearMonth(year, month);
+        validateRegionCode(regionCode);
+
+        Optional<DailyCalendar> existing = calendarRepository.findByYearAndMonth(year, month);
+        if (existing.isPresent()) {
+            DailyCalendar calendar = existing.get();
+            if (regionCode.equals(calendar.getRegion())) {
+                return calendar;
+            }
+        }
+
+        // Generate base calendar using template service with region
+        DailyCalendar baseCalendar = templateService.generateBaseCalendar(year, month, regionCode);
+        return calendarRepository.save(baseCalendar);
     }
 
-    public Optional<DailyCalendar> getCalendar(String year, String month) {
-        log.debug("Fetching calendar for {}-{}", year, month);
-        return calendarRepository.findByYearAndMonth(year, month);
-    }
+    // ===== CREATE OPERATIONS =====
 
-    public DailyCalendar createCalendar(DailyCalendar calendar) {
+    /**
+     * Create a new calendar
+     */
+    public DailyCalendar createCalendar(@Valid DailyCalendar calendar) {
         log.debug("Creating calendar for {}-{}", calendar.getYear(), calendar.getMonth());
+
+        validateCalendarData(calendar);
+
+        // Check if calendar already exists
         if (calendarRepository.existsByYearAndMonth(calendar.getYear(), calendar.getMonth())) {
-            throw new RuntimeException("Calendar already exists for " + calendar.getYear() + "-" + calendar.getMonth());
+            throw new IllegalArgumentException("Calendar already exists for " +
+                    calendar.getYear() + "-" + calendar.getMonth());
         }
+
         return calendarRepository.save(calendar);
     }
 
-    public DailyCalendar updateCalendar(String year, String month, DailyCalendar calendar) {
-        log.debug("Updating calendar for {}-{}", year, month);
-        Optional<DailyCalendar> existingCalendar = calendarRepository.findByYearAndMonth(year, month);
-        if (existingCalendar.isPresent()) {
-            DailyCalendar existing = existingCalendar.get();
-            existing.setDays(calendar.getDays());
-            return calendarRepository.save(existing);
-        } else {
-            calendar.setYear(year);
-            calendar.setMonth(month);
-            return calendarRepository.save(calendar);
-        }
-    }
-
-    public void deleteCalendar(String year, String month) {
-        log.debug("Deleting calendar for {}-{}", year, month);
-        calendarRepository.deleteByYearAndMonth(year, month);
-    }
-
-    // ===== CALENDAR GENERATION =====
-
+    /**
+     * Generate calendar from template
+     */
     public DailyCalendar generateCalendar(String year, String month, List<Integer> holidays) {
         log.debug("Generating calendar for {}-{} with holidays: {}", year, month, holidays);
-        int yearInt = Integer.parseInt(year);
-        int monthInt = Integer.parseInt(month);
-        YearMonth yearMonth = YearMonth.of(yearInt, monthInt);
-        int daysInMonth = yearMonth.lengthOfMonth();
 
-        List<DailyCalendar.DayEntry> days = new ArrayList<>();
+        validateYearMonth(year, month);
 
-        for (int day = 1; day <= daysInMonth; day++) {
-            String dayType = getDayType(yearInt, monthInt, day, holidays);
-            days.add(new DailyCalendar.DayEntry(day, dayType, null));
+        DailyCalendar calendar = templateService.generateBaseCalendar(year, month);
+
+        // Apply additional holidays if provided
+        if (holidays != null && !holidays.isEmpty()) {
+            applyAdditionalHolidays(calendar, holidays);
         }
 
-        DailyCalendar calendar = new DailyCalendar(year, month, days);
         return calendarRepository.save(calendar);
     }
 
-    // ===== ATTENDANCE MANAGEMENT =====
+    // ===== UPDATE OPERATIONS =====
 
+    /**
+     * Update calendar
+     */
+    public DailyCalendar updateCalendar(String year, String month, @Valid DailyCalendar calendar) {
+        log.debug("Updating calendar for {}-{}", year, month);
+
+        validateYearMonth(year, month);
+        validateCalendarData(calendar);
+
+        Optional<DailyCalendar> existingOpt = calendarRepository.findByYearAndMonth(year, month);
+        if (existingOpt.isEmpty()) {
+            throw new IllegalArgumentException("Calendar not found for " + year + "-" + month);
+        }
+
+        DailyCalendar existing = existingOpt.get();
+
+        // Update fields
+        existing.setDays(calendar.getDays());
+        existing.setRegion(calendar.getRegion());
+        existing.setOrganizationId(calendar.getOrganizationId());
+
+        return calendarRepository.save(existing);
+    }
+
+    /**
+     * Update day status (type and attendance)
+     */
+    public DailyCalendar updateDayStatus(String year, String month, int day,
+                                         String type, String attendance, String description) {
+        log.debug("Updating day status for {}-{}-{} to type: {}, attendance: {}",
+                year, month, day, type, attendance);
+
+        DailyCalendar calendar = getOrCreateCalendar(year, month);
+
+        boolean updated = calendar.updateDayStatus(day, type, attendance, description);
+        if (!updated) {
+            throw new IllegalArgumentException("Day " + day + " not found in calendar");
+        }
+
+        // Validate the update
+        validateDayUpdate(type, attendance);
+
+        return calendarRepository.save(calendar);
+    }
+
+    /**
+     * Update only attendance for a working day
+     */
     public DailyCalendar updateAttendance(String year, String month, int day, String attendance) {
         log.debug("Updating attendance for {}-{}-{} to {}", year, month, day, attendance);
 
@@ -116,198 +160,65 @@ public class CalendarService {
             throw new IllegalArgumentException("Invalid attendance type. Must be 'wfoffice' or 'wfh'");
         }
 
-        Optional<DailyCalendar> calendarOpt = calendarRepository.findByYearAndMonth(year, month);
-        if (calendarOpt.isEmpty()) {
-            throw new RuntimeException("Calendar not found for " + year + "-" + month);
+        DailyCalendar calendar = getOrCreateCalendar(year, month);
+
+        boolean updated = calendar.updateAttendance(day, attendance);
+        if (!updated) {
+            throw new IllegalArgumentException("Cannot set attendance for day " + day +
+                    ". Day must exist and be a working day.");
         }
 
-        DailyCalendar calendar = calendarOpt.get();
-        DailyCalendar.DayEntry dayEntry = calendar.getDayEntry(day);
-
-        if (dayEntry == null) {
-            throw new RuntimeException("Day " + day + " not found in calendar");
-        }
-
-        if (!"working".equals(dayEntry.getType())) {
-            throw new RuntimeException("Cannot set attendance for non-working day");
-        }
-
-        dayEntry.setAttendance(attendance);
         return calendarRepository.save(calendar);
     }
 
-    public DailyCalendar addDayEntry(String year, String month, DailyCalendar.DayEntry dayEntry) {
-        log.debug("Adding day entry for {}-{}-{}", year, month, dayEntry.getDay());
-        Optional<DailyCalendar> calendarOpt = calendarRepository.findByYearAndMonth(year, month);
-        if (calendarOpt.isEmpty()) {
-            throw new RuntimeException("Calendar not found for " + year + "-" + month);
-        }
-
-        DailyCalendar calendar = calendarOpt.get();
-        calendar.addDayEntry(dayEntry);
-        return calendarRepository.save(calendar);
-    }
-
+    /**
+     * Update only day type
+     */
     public DailyCalendar updateDayType(String year, String month, int day, String type) {
         log.debug("Updating day type for {}-{}-{} to {}", year, month, day, type);
 
         // Validate day type
-        if (!Arrays.asList("working", "holiday", "weekend").contains(type)) {
-            throw new IllegalArgumentException("Invalid day type. Must be 'working', 'holiday', or 'weekend'");
+        if (!Arrays.asList("working", "holiday", "weekend", "leave").contains(type)) {
+            throw new IllegalArgumentException("Invalid day type. Must be 'working', 'holiday', 'weekend', or 'leave'");
         }
 
-        Optional<DailyCalendar> calendarOpt = calendarRepository.findByYearAndMonth(year, month);
-        if (calendarOpt.isEmpty()) {
-            throw new RuntimeException("Calendar not found for " + year + "-" + month);
-        }
+        DailyCalendar calendar = getOrCreateCalendar(year, month);
+        boolean updated = calendar.updateDayType(day, type);
 
-        DailyCalendar calendar = calendarOpt.get();
-        DailyCalendar.DayEntry dayEntry = calendar.getDayEntry(day);
-
-        if (dayEntry == null) {
-            throw new RuntimeException("Day " + day + " not found in calendar");
-        }
-
-        dayEntry.setType(type);
-        if (!"working".equals(type)) {
-            dayEntry.setAttendance(null); // Clear attendance for non-working days
+        if (!updated) {
+            throw new IllegalArgumentException("Day " + day + " not found in calendar");
         }
 
         return calendarRepository.save(calendar);
     }
 
-    // ===== QUERY METHODS =====
+    /**
+     * Add day entry
+     */
+    public DailyCalendar addDayEntry(String year, String month, DailyCalendar.DayEntry dayEntry) {
+        log.debug("Adding day entry for {}-{}-{}", year, month, dayEntry.getDay());
 
-    public List<DailyCalendar> getCalendarsByYear(String year) {
-        log.debug("Fetching calendars for year {}", year);
-        return calendarRepository.findByYear(year);
+        validateDayEntry(dayEntry);
+
+        DailyCalendar calendar = getOrCreateCalendar(year, month);
+        calendar.addDayEntry(dayEntry);
+
+        return calendarRepository.save(calendar);
     }
 
-    public List<DailyCalendar> getCalendarsWithHolidays() {
-        log.debug("Fetching calendars with holidays");
-        return calendarRepository.findCalendarsWithHolidays();
-    }
+    // ===== BULK UPDATE OPERATIONS =====
 
-    public List<DailyCalendar> getCalendarsWithAttendance() {
-        log.debug("Fetching calendars with attendance data");
-        return calendarRepository.findCalendarsWithAttendance();
-    }
-
-    public List<DailyCalendar> getCalendarsByAttendanceType(String attendanceType) {
-        log.debug("Fetching calendars with attendance type: {}", attendanceType);
-        return calendarRepository.findByAttendanceType(attendanceType);
-    }
-
-    public List<DailyCalendar> getCalendarsWithOfficeAttendance() {
-        log.debug("Fetching calendars with office attendance");
-        return calendarRepository.findCalendarsWithOfficeAttendance();
-    }
-
-    public List<DailyCalendar> getCalendarsWithWfhAttendance() {
-        log.debug("Fetching calendars with WFH attendance");
-        return calendarRepository.findCalendarsWithWfhAttendance();
-    }
-
-    public List<DailyCalendar> getCalendarsWithMixedAttendance() {
-        log.debug("Fetching calendars with mixed attendance");
-        return calendarRepository.findCalendarsWithMixedAttendance();
-    }
-
-    public List<DailyCalendar> getCalendarsByDateRange(String startYear, String startMonth, String endYear, String endMonth) {
-        log.debug("Fetching calendars from {}-{} to {}-{}", startYear, startMonth, endYear, endMonth);
-        return calendarRepository.findByDateRange(startYear, startMonth, endYear, endMonth);
-    }
-
-    public List<DailyCalendar> getCalendarsWithIncompleteAttendance() {
-        log.debug("Fetching calendars with incomplete attendance");
-        return calendarRepository.findCalendarsWithIncompleteAttendance();
-    }
-
-    public List<DailyCalendar> getCalendarsWithFullAttendance() {
-        log.debug("Fetching calendars with full attendance");
-        return calendarRepository.findCalendarsWithFullAttendance();
-    }
-
-    // ===== STATISTICS =====
-
-    public Map<String, Object> getCalendarStatistics(String year, String month) {
-        log.debug("Calculating statistics for {}-{}", year, month);
-        Optional<DailyCalendar> calendarOpt = calendarRepository.findByYearAndMonth(year, month);
-        if (calendarOpt.isEmpty()) {
-            throw new RuntimeException("Calendar not found for " + year + "-" + month);
-        }
-
-        DailyCalendar calendar = calendarOpt.get();
-        Map<String, Object> stats = new HashMap<>();
-
-        stats.put("totalDays", calendar.getDays().size());
-        stats.put("workingDays", calendar.getWorkingDaysCount());
-        stats.put("holidays", calendar.getHolidaysCount());
-        stats.put("weekends", calendar.getWeekendsCount());
-        stats.put("officeAttendance", calendar.getOfficeAttendanceCount());
-        stats.put("wfhAttendance", calendar.getWfhAttendanceCount());
-        stats.put("totalAttendance", calendar.getAttendanceDaysCount());
-        stats.put("workingDaysWithoutAttendance", calendar.getWorkingDaysWithoutAttendance());
-        stats.put("attendanceRate", calendar.getAttendanceRate());
-        stats.put("officeAttendanceRate", calendar.getOfficeAttendanceRate());
-        stats.put("wfhAttendanceRate", calendar.getWfhAttendanceRate());
-
-        return stats;
-    }
-
-    public Map<String, Object> getOverallStatistics() {
-        log.debug("Calculating overall statistics");
-        Map<String, Object> stats = new HashMap<>();
-
-        stats.put("totalCalendars", calendarRepository.count());
-        stats.put("totalWorkingDays", calendarRepository.countWorkingDays());
-        stats.put("totalHolidays", calendarRepository.countHolidays());
-        stats.put("totalWeekends", calendarRepository.countWeekends());
-        stats.put("totalOfficeAttendance", calendarRepository.countOfficeAttendanceDays());
-        stats.put("totalWfhAttendance", calendarRepository.countWfhAttendanceDays());
-
-        return stats;
-    }
-
-    public Map<String, Object> getYearlyStatistics(String year) {
-        log.debug("Calculating yearly statistics for {}", year);
-        List<DailyCalendar> yearCalendars = calendarRepository.findByYear(year);
-
-        Map<String, Object> stats = new HashMap<>();
-        stats.put("year", year);
-        stats.put("totalMonths", yearCalendars.size());
-
-        long totalWorkingDays = yearCalendars.stream().mapToLong(DailyCalendar::getWorkingDaysCount).sum();
-        long totalHolidays = yearCalendars.stream().mapToLong(DailyCalendar::getHolidaysCount).sum();
-        long totalWeekends = yearCalendars.stream().mapToLong(DailyCalendar::getWeekendsCount).sum();
-        long totalOfficeAttendance = yearCalendars.stream().mapToLong(DailyCalendar::getOfficeAttendanceCount).sum();
-        long totalWfhAttendance = yearCalendars.stream().mapToLong(DailyCalendar::getWfhAttendanceCount).sum();
-
-        stats.put("totalWorkingDays", totalWorkingDays);
-        stats.put("totalHolidays", totalHolidays);
-        stats.put("totalWeekends", totalWeekends);
-        stats.put("totalOfficeAttendance", totalOfficeAttendance);
-        stats.put("totalWfhAttendance", totalWfhAttendance);
-
-        if (totalWorkingDays > 0) {
-            stats.put("yearlyAttendanceRate", (double)(totalOfficeAttendance + totalWfhAttendance) / totalWorkingDays);
-            stats.put("yearlyOfficeRate", (double)totalOfficeAttendance / totalWorkingDays);
-            stats.put("yearlyWfhRate", (double)totalWfhAttendance / totalWorkingDays);
-        }
-
-        return stats;
-    }
-
-    // ===== BULK OPERATIONS =====
-
+    /**
+     * Bulk update multiple days' attendance
+     */
     public List<DailyCalendar> bulkUpdateAttendance(String year, String month, Map<Integer, String> attendanceMap) {
         log.debug("Bulk updating attendance for {}-{}", year, month);
-        Optional<DailyCalendar> calendarOpt = calendarRepository.findByYearAndMonth(year, month);
-        if (calendarOpt.isEmpty()) {
-            throw new RuntimeException("Calendar not found for " + year + "-" + month);
+
+        if (attendanceMap == null || attendanceMap.isEmpty()) {
+            throw new IllegalArgumentException("Attendance map cannot be null or empty");
         }
 
-        DailyCalendar calendar = calendarOpt.get();
+        DailyCalendar calendar = getOrCreateCalendar(year, month);
 
         for (Map.Entry<Integer, String> entry : attendanceMap.entrySet()) {
             int day = entry.getKey();
@@ -319,67 +230,209 @@ public class CalendarService {
                 continue;
             }
 
-            DailyCalendar.DayEntry dayEntry = calendar.getDayEntry(day);
-            if (dayEntry != null && "working".equals(dayEntry.getType())) {
-                dayEntry.setAttendance(attendance);
-            }
+            calendar.updateAttendance(day, attendance);
         }
 
-        return Arrays.asList(calendarRepository.save(calendar));
+        DailyCalendar savedCalendar = calendarRepository.save(calendar);
+        return Arrays.asList(savedCalendar);
     }
 
+    /**
+     * Bulk update multiple days' types
+     */
     public List<DailyCalendar> bulkUpdateDayTypes(String year, String month, Map<Integer, String> dayTypeMap) {
         log.debug("Bulk updating day types for {}-{}", year, month);
-        Optional<DailyCalendar> calendarOpt = calendarRepository.findByYearAndMonth(year, month);
-        if (calendarOpt.isEmpty()) {
-            throw new RuntimeException("Calendar not found for " + year + "-" + month);
+
+        if (dayTypeMap == null || dayTypeMap.isEmpty()) {
+            throw new IllegalArgumentException("Day type map cannot be null or empty");
         }
 
-        DailyCalendar calendar = calendarOpt.get();
+        DailyCalendar calendar = getOrCreateCalendar(year, month);
 
         for (Map.Entry<Integer, String> entry : dayTypeMap.entrySet()) {
             int day = entry.getKey();
             String type = entry.getValue();
 
             // Validate day type
-            if (!Arrays.asList("working", "holiday", "weekend").contains(type)) {
+            if (!Arrays.asList("working", "holiday", "weekend", "leave").contains(type)) {
                 log.warn("Invalid day type {} for day {}, skipping", type, day);
                 continue;
             }
 
-            DailyCalendar.DayEntry dayEntry = calendar.getDayEntry(day);
-            if (dayEntry != null) {
-                dayEntry.setType(type);
-                if (!"working".equals(type)) {
-                    dayEntry.setAttendance(null); // Clear attendance for non-working days
-                }
-            }
+            calendar.updateDayType(day, type);
         }
 
-        return Arrays.asList(calendarRepository.save(calendar));
+        DailyCalendar savedCalendar = calendarRepository.save(calendar);
+        return Arrays.asList(savedCalendar);
+    }
+
+    // ===== DELETE OPERATIONS =====
+
+    /**
+     * Delete calendar
+     */
+    public void deleteCalendar(String year, String month) {
+        log.debug("Deleting calendar for {}-{}", year, month);
+
+        validateYearMonth(year, month);
+
+        if (!calendarRepository.existsByYearAndMonth(year, month)) {
+            throw new IllegalArgumentException("Calendar not found for " + year + "-" + month);
+        }
+
+        calendarRepository.deleteByYearAndMonth(year, month);
+        log.info("Deleted calendar for {}-{}", year, month);
+    }
+
+    // ===== READ-ONLY OPERATIONS =====
+
+    /**
+     * Get day status information
+     */
+    public Map<String, String> getDayStatus(String year, String month, int day) {
+        DailyCalendar calendar = getOrCreateCalendar(year, month);
+
+        Optional<DailyCalendar.DayEntry> dayEntryOpt = calendar.getDayEntry(day);
+        if (dayEntryOpt.isEmpty()) {
+            throw new IllegalArgumentException("Day " + day + " not found in " + year + "-" + month);
+        }
+
+        DailyCalendar.DayEntry dayEntry = dayEntryOpt.get();
+        Map<String, String> status = new HashMap<>();
+        status.put("day", String.valueOf(day));
+        status.put("type", dayEntry.getType());
+        status.put("isUpdated", String.valueOf(dayEntry.getIsUpdated()));
+
+        if ("working".equals(dayEntry.getType())) {
+            status.put("attendance", dayEntry.getAttendance() != null ? dayEntry.getAttendance() : "not_set");
+        } else {
+            status.put("attendance", "not_applicable");
+        }
+
+        if (dayEntry.getDescription() != null) {
+            status.put("description", dayEntry.getDescription());
+        }
+
+        return status;
+    }
+
+    /**
+     * Get all calendars
+     */
+    public List<DailyCalendar> getAllCalendars() {
+        log.debug("Fetching all calendars");
+        return calendarRepository.findAll();
+    }
+
+    /**
+     * Get calendar (without auto-creation)
+     */
+    public Optional<DailyCalendar> getCalendar(String year, String month) {
+        log.debug("Fetching calendar for {}-{}", year, month);
+        validateYearMonth(year, month);
+        return calendarRepository.findByYearAndMonth(year, month);
+    }
+
+    // ===== STATISTICS =====
+
+    public Map<String, Object> getCalendarStatistics(String year, String month) {
+        log.debug("Calculating statistics for {}-{}", year, month);
+        DailyCalendar calendar = getOrCreateCalendar(year, month);
+
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("totalDays", calendar.getDays().size());
+        stats.put("workingDays", calendar.getWorkingDaysCount());
+        stats.put("holidays", calendar.getHolidaysCount());
+        stats.put("weekends", calendar.getWeekendsCount());
+        stats.put("leaveDays", calendar.getLeaveDaysCount());
+        stats.put("officeAttendance", calendar.getOfficeAttendanceCount());
+        stats.put("wfhAttendance", calendar.getWfhAttendanceCount());
+        stats.put("totalAttendance", calendar.getAttendanceDaysCount());
+        stats.put("workingDaysWithoutAttendance", calendar.getWorkingDaysWithoutAttendance());
+        stats.put("updatedDays", calendar.getUpdatedDaysCount());
+        stats.put("attendanceRate", calendar.getAttendanceRate());
+        stats.put("officeAttendanceRate", calendar.getOfficeAttendanceRate());
+        stats.put("wfhAttendanceRate", calendar.getWfhAttendanceRate());
+
+        return stats;
+    }
+
+    public Map<String, Object> getOverallStatistics() {
+        log.debug("Calculating overall statistics");
+        List<DailyCalendar> allCalendars = calendarRepository.findAll();
+
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("totalCalendars", allCalendars.size());
+        stats.put("totalWorkingDays", allCalendars.stream().mapToLong(DailyCalendar::getWorkingDaysCount).sum());
+        stats.put("totalHolidays", allCalendars.stream().mapToLong(DailyCalendar::getHolidaysCount).sum());
+        stats.put("totalWeekends", allCalendars.stream().mapToLong(DailyCalendar::getWeekendsCount).sum());
+        stats.put("totalOfficeAttendance", allCalendars.stream().mapToLong(DailyCalendar::getOfficeAttendanceCount).sum());
+        stats.put("totalWfhAttendance", allCalendars.stream().mapToLong(DailyCalendar::getWfhAttendanceCount).sum());
+
+        return stats;
+    }
+
+    public Map<String, Object> getYearlyStatistics(String year) {
+        log.debug("Calculating yearly statistics for {}", year);
+        List<DailyCalendar> yearCalendars = calendarRepository.findByYear(year);
+
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("year", year);
+        stats.put("totalCalendars", yearCalendars.size());
+        stats.put("totalWorkingDays", yearCalendars.stream().mapToLong(DailyCalendar::getWorkingDaysCount).sum());
+        stats.put("totalHolidays", yearCalendars.stream().mapToLong(DailyCalendar::getHolidaysCount).sum());
+        stats.put("totalWeekends", yearCalendars.stream().mapToLong(DailyCalendar::getWeekendsCount).sum());
+        stats.put("totalOfficeAttendance", yearCalendars.stream().mapToLong(DailyCalendar::getOfficeAttendanceCount).sum());
+        stats.put("totalWfhAttendance", yearCalendars.stream().mapToLong(DailyCalendar::getWfhAttendanceCount).sum());
+
+        return stats;
+    }
+
+    // ===== QUERY METHODS =====
+
+    public List<DailyCalendar> getCalendarsByYear(String year) {
+        validateYear(year);
+        return calendarRepository.findByYear(year);
+    }
+
+    public List<DailyCalendar> getCalendarsWithHolidays() {
+        return calendarRepository.findCalendarsWithHolidays();
+    }
+
+    public List<DailyCalendar> getCalendarsWithAttendance() {
+        return calendarRepository.findCalendarsWithAttendance();
+    }
+
+    public List<DailyCalendar> getCalendarsWithOfficeAttendance() {
+        return calendarRepository.findCalendarsWithOfficeAttendance();
+    }
+
+    public List<DailyCalendar> getCalendarsWithWfhAttendance() {
+        return calendarRepository.findCalendarsWithWfhAttendance();
+    }
+
+    public List<DailyCalendar> getCalendarsWithMixedAttendance() {
+        return calendarRepository.findCalendarsWithMixedAttendance();
+    }
+
+    public List<DailyCalendar> getCalendarsWithIncompleteAttendance() {
+        return calendarRepository.findCalendarsWithIncompleteAttendance();
+    }
+
+    public List<DailyCalendar> getCalendarsWithFullAttendance() {
+        return calendarRepository.findCalendarsWithFullAttendance();
+    }
+
+    public List<DailyCalendar> getCalendarsByDateRange(String startYear, String startMonth, String endYear, String endMonth) {
+        validateYearMonth(startYear, startMonth);
+        validateYearMonth(endYear, endMonth);
+        return calendarRepository.findByDateRange(startYear, startMonth, endYear, endMonth);
     }
 
     // ===== UTILITY METHODS =====
 
-    private String getDayType(int year, int month, int day, List<Integer> holidays) {
-        // Check if it's a holiday
-        if (holidays != null && holidays.contains(day)) {
-            return "holiday";
-        }
-
-        // Check if it's a weekend (Saturday = 7, Sunday = 1)
-        Calendar cal = Calendar.getInstance();
-        cal.set(year, month - 1, day); // Month is 0-based in Calendar
-        int dayOfWeek = cal.get(Calendar.DAY_OF_WEEK);
-
-        if (dayOfWeek == Calendar.SATURDAY || dayOfWeek == Calendar.SUNDAY) {
-            return "weekend";
-        }
-
-        return "working";
-    }
-
     public boolean calendarExists(String year, String month) {
+        validateYearMonth(year, month);
         return calendarRepository.existsByYearAndMonth(year, month);
     }
 
@@ -392,38 +445,96 @@ public class CalendarService {
     }
 
     public long getCalendarCountByYear(String year) {
+        validateYear(year);
         return calendarRepository.countByYear(year);
     }
 
-    // ===== VALIDATION METHODS =====
+    // ===== PRIVATE VALIDATION METHODS =====
 
     public void validateCalendarData(DailyCalendar calendar) {
-        log.debug("Validating calendar data for {}-{}", calendar.getYear(), calendar.getMonth());
-
-        // Check for duplicate days
-        Set<Integer> daySet = new HashSet<>();
-        for (DailyCalendar.DayEntry day : calendar.getDays()) {
-            if (!daySet.add(day.getDay())) {
-                throw new IllegalArgumentException("Duplicate day found: " + day.getDay());
-            }
+        if (calendar == null) {
+            throw new IllegalArgumentException("Calendar cannot be null");
         }
 
-        // Check for valid day range
-        int yearInt = Integer.parseInt(calendar.getYear());
-        int monthInt = Integer.parseInt(calendar.getMonth());
-        YearMonth yearMonth = YearMonth.of(yearInt, monthInt);
-        int maxDays = yearMonth.lengthOfMonth();
+        validateYearMonth(calendar.getYear(), calendar.getMonth());
 
-        for (DailyCalendar.DayEntry day : calendar.getDays()) {
-            if (day.getDay() < 1 || day.getDay() > maxDays) {
-                throw new IllegalArgumentException("Invalid day " + day.getDay() + " for month " + calendar.getMonth());
-            }
+        if (calendar.getDays() == null) {
+            throw new IllegalArgumentException("Calendar days cannot be null");
         }
 
-        // Check attendance is only set for working days
+        // Validate each day entry
         for (DailyCalendar.DayEntry day : calendar.getDays()) {
-            if (day.getAttendance() != null && !"working".equals(day.getType())) {
-                throw new IllegalArgumentException("Attendance cannot be set for non-working day: " + day.getDay());
+            validateDayEntry(day);
+        }
+    }
+
+    private void validateDayEntry(DailyCalendar.DayEntry dayEntry) {
+        if (dayEntry == null) {
+            throw new IllegalArgumentException("Day entry cannot be null");
+        }
+
+        if (dayEntry.getDay() < 1 || dayEntry.getDay() > 31) {
+            throw new IllegalArgumentException("Day must be between 1 and 31");
+        }
+
+        if (dayEntry.getType() == null ||
+                !Arrays.asList("working", "holiday", "weekend", "leave").contains(dayEntry.getType())) {
+            throw new IllegalArgumentException("Invalid day type");
+        }
+
+        if (dayEntry.getAttendance() != null &&
+                !Arrays.asList("wfoffice", "wfh").contains(dayEntry.getAttendance())) {
+            throw new IllegalArgumentException("Invalid attendance type");
+        }
+
+        if (!"working".equals(dayEntry.getType()) && dayEntry.getAttendance() != null) {
+            throw new IllegalArgumentException("Attendance can only be set for working days");
+        }
+    }
+
+    private void validateDayUpdate(String type, String attendance) {
+        if (!"working".equals(type) && attendance != null) {
+            throw new IllegalArgumentException("Attendance can only be set for working days");
+        }
+
+        if (attendance != null && !Arrays.asList("wfoffice", "wfh").contains(attendance)) {
+            throw new IllegalArgumentException("Invalid attendance type");
+        }
+    }
+
+    private void validateYearMonth(String year, String month) {
+        validateYear(year);
+        validateMonth(month);
+    }
+
+    private void validateYear(String year) {
+        if (year == null || !year.matches("\\d{4}")) {
+            throw new IllegalArgumentException("Year must be 4 digits");
+        }
+    }
+
+    private void validateMonth(String month) {
+        if (month == null || !month.matches("^(0[1-9]|1[0-2])$")) {
+            throw new IllegalArgumentException("Month must be 01-12");
+        }
+    }
+
+    private void validateRegionCode(String regionCode) {
+        if (regionCode == null || regionCode.trim().isEmpty()) {
+            throw new IllegalArgumentException("Region code cannot be null or empty");
+        }
+    }
+
+    private void applyAdditionalHolidays(DailyCalendar calendar, List<Integer> holidays) {
+        for (Integer holiday : holidays) {
+            if (holiday >= 1 && holiday <= 31) {
+                Optional<DailyCalendar.DayEntry> dayEntryOpt = calendar.getDayEntry(holiday);
+                if (dayEntryOpt.isPresent()) {
+                    DailyCalendar.DayEntry dayEntry = dayEntryOpt.get();
+                    if (!"holiday".equals(dayEntry.getType())) {
+                        calendar.updateDayType(holiday, "holiday");
+                    }
+                }
             }
         }
     }
